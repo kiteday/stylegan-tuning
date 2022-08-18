@@ -13,12 +13,12 @@ from PIL import Image
 from non_leaking import augment
 from tun_model2 import Encoder, Generator, Classifier
 from tun_model2 import Model as S2FGAN
-from tuning_dataset import CustomDataset
+from tun_dset2 import CustomDataset
 from tun_train2 import accumulate, sample_data
 
 def generate(loader, model):
     img = next(loader)
-    # print(img)
+    print(img)
     
     with torch.no_grad():
         samples = None
@@ -139,9 +139,16 @@ if __name__=="__main__":
                         )
 
     parser.add_argument(
-                        "--input_img_path", 
-                        type=str,  
-                        help="size of image width"
+                        "--img_folder", 
+                        type=str,
+                        default="test_image", 
+                        help="image folder"
+                        )
+
+    parser.add_argument(
+                        "--img_path",
+                        type=str,
+                        default="3.jpg"
                         )
 
     args = parser.parse_args()
@@ -177,10 +184,11 @@ if __name__=="__main__":
     model = nn.DataParallel(model, [0])
 
 
+    
 
-    img = read_data(args.input_img_path)
+    # img = read_data(args.img_folder +'/'+ args.img_path)
  
-    test_data = CustomDataset(args, img, args.input_img_path)
+    test_data = CustomDataset(args, args.img_path, args.img_folder)
     dataloader_val = torch.utils.data.DataLoader(
         test_data, 
         batch_size=len(args.ATMDTT) + 2,
