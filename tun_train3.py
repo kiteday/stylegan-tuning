@@ -20,8 +20,8 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils import data
 from torchvision import utils
-from tuning_model import Model as S2FGAN
-from tuning_dataset import CeleDataset, CustomDataset2
+from tun_model3 import Model as S2FGAN
+from tuning_dataset import CeleDataset
 from non_leaking import augment
 import time
 import datetime
@@ -138,28 +138,9 @@ def sample_data(loader,device):
             label  = label
             data = pref.next()
             yield [img,label]
-
+   
 
 def train(args, dataloader_train, dataloader_val, models, g_optim, d_optim, device):
-    
-    """
-    Return normalized sketch, normalized images and label
-    Parameters
-    ----------
-    args             : args for S2FGAN
-    dataloader_train : dataloader for training
-    dataloader_val   : dataloader for evaluation
-    models           : S2FGAN models
-    g_optim          : generator optimizer 
-    d_optim          : discriminator optimizer
-    device           : cuda device
-    
-    Returns
-    -------
-    None
-    A trained S2FGAN.
-    """
-    
     [model,model_ema] = models
     # model = models
     #speed data loading and process data
@@ -185,12 +166,12 @@ def train(args, dataloader_train, dataloader_val, models, g_optim, d_optim, devi
     for idx in range(args.iter):
         i = idx + args.start_iter
 
+        
         if i > args.iter:
             print("Done!")
-
             break
 
-        img,label = next(loader)
+        img, label = next(loader)
         
         #samples attribute shiting vector
         sampled_ratio = torch.FloatTensor(np.random.uniform(-4,4, (img.size(0), c_dim))).to(device)
@@ -256,7 +237,7 @@ def train(args, dataloader_train, dataloader_val, models, g_optim, d_optim, devi
         target_mask   = target_ratio >= 0
 
         
-        g_loss = model(img,sampled_ratio,label,target_mask, domain_img, ada_aug_p = ada_aug_p, train_generator = True)
+        g_loss, g_ema = model(img,sampled_ratio,label,target_mask, ada_aug_p = ada_aug_p, train_generator = True)
         g_loss = g_loss.mean() 
         
         loss_dict["g_loss"]     = g_loss
@@ -288,17 +269,17 @@ def train(args, dataloader_train, dataloader_val, models, g_optim, d_optim, devi
             )
             
         #sample images
-        if i % 100 == 0:
+        if i % 500 == 0:
             img,label = next(loader_val)
             with torch.no_grad():
                 samples = None
                 for j,l in zip(img,torch.cat((LABELS,label[-2:]))):
-                    # d =   e.view(1,args.img_height,args.img_width).repeat(3,1,1)
-                    # e  =  e.view(1,1,256,256).repeat(13,1,1,1) 
+                    # print(j)
                     l  =  l.view(1,12).repeat(13,1) * SCALE
-                    k = model_ema(j.view(1,3,256,256),sampled_ratio = l,generate = True) 
-                    im = torch.cat([x for x in k],-1) 
-                    sample = torch.cat((k.view(3,256,256),j,im),-1).unsqueeze(0)
+                    k = model_ema(j.view(1,3,256,256), generate = True)
+                    print(k)
+                    # im = torch.cat([x for x in k],-1) 
+                    sample = torch.cat((j,k.view(3,256,256)),-1).unsqueeze(0)
                     samples = sample if samples is None else torch.cat((samples,sample),-2)
                     
                 utils.save_image(
@@ -320,6 +301,7 @@ def train(args, dataloader_train, dataloader_val, models, g_optim, d_optim, devi
                     "model_ema":model_ema.state_dict(),
                     "g_optim": g_optim.state_dict(),
                     "d_optim": d_optim.state_dict(),
+                    "g_ema" : g_ema.state_dict(),
                     "args": args,
                 },
                 f"checkpoint/{str(i).zfill(6)}.pt",
@@ -342,7 +324,7 @@ if __name__ == "__main__":
     parser.add_argument(
                         "--batch",
                         type=int, 
-                        default = 4, 
+                        default = 2, 
                         help="batch sizes"
                         )
     
@@ -460,8 +442,7 @@ if __name__ == "__main__":
                         nargs="+",
                         help="Attributes to manipulate during testing time",
                         default= 
-                        [[1,0,0,0,0,0,0,0,0,0,0,0],
-                         [0,0,0,0,0,0,0,0,0,0,0,0]
+                        [[0,0,0,0,0,0,0,0,0,0,0,0],
                          ]
                         )
     
@@ -488,7 +469,8 @@ if __name__ == "__main__":
                         )
 
     args = parser.parse_args()
-    
+
+        
     args.start_iter = 0
     c_dim = len(args.selected_attrs)
     
@@ -507,15 +489,17 @@ if __name__ == "__main__":
 
     #initialization
     model     = S2FGAN(args,c_dim,augment) 
+    model_ema = S2FGAN(args,c_dim,augment).to(device)
 
     if args.ckpt is not None:
         print("load model" + args.ckpt)
         ckpt = torch.load(args.ckpt)
         model.load_state_dict(ckpt["model"])
+        model_ema.load_state_dict(ckpt["model_ema"])
 
     model.to(device)
-    model_ema = S2FGAN(args,c_dim,augment).to(device)
-    
+    model_ema.to(device)
+
     accumulate(model_ema, model, 0)
     model_ema.eval()
     
@@ -535,26 +519,41 @@ if __name__ == "__main__":
     #initialize dataloader
 
     dataset = CeleDataset(args, True)
+    # loader = data.DataLoader(
+    #     dataset,
+    #     batch_size=args.batch,
+    #     num_workers = 1,
+    #     drop_last = True
+    # )
+
     # dataset = CustomDataset2(args, args.image_path, True)
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,
-        num_workers = 1,
+        num_workers = 0,
         drop_last = True
     )
 
     dataset_val = CeleDataset(args, False)
+    # dataloader_val = torch.utils.data.DataLoader(
+    #     dataset_val, 
+    #     batch_size=len(args.ATMDTT) + 2,
+    #     num_workers=1
+    # )
+
     # dataset_val = CustomDataset2(args, args.image_path, True)
     dataloader_val = torch.utils.data.DataLoader(
         dataset_val, 
-        batch_size=len(args.ATMDTT) + 2,
-        num_workers=1
+        batch_size = 2,
+        # batch_size=len(args.ATMDTT) + 2,
+        num_workers=0
     )
     
     
     #Intialise the intensity control parameters for demonstration
     LABELS = torch.FloatTensor(args.ATMDTT).to(device)
     SCALE =  torch.FloatTensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).to(device).view(13,1)
+    # SCALE =  torch.FloatTensor([-4.0,-3.0, -2.0,-1.5, -1.0, -0.5,0,0.5, 1.0,1.5,2.0,3.0,4.0]).to(device).view(13,1)
     
     #start training
     train(args,loader,dataloader_val,[model,model_ema], g_optim, d_optim, device)

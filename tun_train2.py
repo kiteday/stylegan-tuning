@@ -21,7 +21,7 @@ from torch.nn import functional as F
 from torch.utils import data
 from torchvision import utils
 from tuning_model import Model as S2FGAN
-from tuning_dataset import CeleDataset
+from tuning_dataset import CeleDataset, CustomDataset2
 from non_leaking import augment
 import time
 import datetime
@@ -184,12 +184,13 @@ def train(args, dataloader_train, dataloader_val, models, g_optim, d_optim, devi
     for idx in range(args.iter):
         i = idx + args.start_iter
 
+        
         if i > args.iter:
             print("Done!")
 
             break
 
-        img,label = next(loader)
+        img = next(loader)
         
         #samples attribute shiting vector
         sampled_ratio = torch.FloatTensor(np.random.uniform(-4,4, (img.size(0), c_dim))).to(device)
@@ -272,6 +273,7 @@ def train(args, dataloader_train, dataloader_val, models, g_optim, d_optim, devi
         g_loss    = loss_reduced["g_loss"].item()
         r1        = loss_reduced["r1"].item()
         
+        print(i)
         #Print log
         if i % 10 == 0:
             # Determine approximate time left
@@ -295,7 +297,7 @@ def train(args, dataloader_train, dataloader_val, models, g_optim, d_optim, devi
                     # d =   e.view(1,args.img_height,args.img_width).repeat(3,1,1)
                     # e  =  e.view(1,1,256,256).repeat(13,1,1,1) 
                     l  =  l.view(1,12).repeat(13,1) * SCALE
-                    k = model_ema(j.view(1,3,256,256),sampled_ratio = l,generate = True) 
+                    k = model_ema(j.view(1,3,256,256), generate = True) 
                     im = torch.cat([x for x in k],-1) 
                     sample = torch.cat((j,k.view(3,256,256),im),-1).unsqueeze(0)
                     samples = sample if samples is None else torch.cat((samples,sample),-2)
@@ -341,7 +343,7 @@ if __name__ == "__main__":
     parser.add_argument(
                         "--batch",
                         type=int, 
-                        default = 4, 
+                        default = 2, 
                         help="batch sizes"
                         )
     
@@ -422,13 +424,15 @@ if __name__ == "__main__":
     parser.add_argument(
                         "--imageZip", 
                         type=str, 
-                        default= "data/CelebAMask-HQ-Sample.zip"
+                        default= "data/test_dataset.zip"
+                        # "data/CelebAMask-HQ-Sample.zip"
                         )
     
     parser.add_argument(
                         "--imagePath",
                         type=str, 
-                        default= "CelebAMask-HQ-Sample/CelebA-HQ-img"
+                        default= "test_img"
+                        # "CelebAMask-HQ-Sample/CelebA-HQ-img"
                         )
     
     parser.add_argument(
@@ -478,8 +482,16 @@ if __name__ == "__main__":
                         help="path to the checkpoints to resume training",
                         )
 
+    parser.add_argument(
+                        "--image_path", 
+                        type=str,
+                        default=None,
+                        help="path to the images (NOT .zip)",
+                        )
+
     args = parser.parse_args()
-    
+
+        
     args.start_iter = 0
     c_dim = len(args.selected_attrs)
     
@@ -516,6 +528,10 @@ if __name__ == "__main__":
     
     g_optim = model.g_optim
     d_optim = model.d_optim
+
+    if args.ckpt is not None:
+        g_optim = model.load_state_dict(ckpt["g_optim"])
+        d_optim = model.load_state_dict(ckpt["d_optim"])
             
     # 모델 GPU 2개
     model = nn.DataParallel(model, [0])
@@ -524,24 +540,40 @@ if __name__ == "__main__":
     #initialize dataloader
 
     dataset = CeleDataset(args, True)
+    # loader = data.DataLoader(
+    #     dataset,
+    #     batch_size=args.batch,
+    #     num_workers = 1,
+    #     drop_last = True
+    # )
+
+    # dataset = CustomDataset2(args, args.image_path, True)
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,
-        num_workers = 4,
+        num_workers = 0,
         drop_last = True
     )
 
     dataset_val = CeleDataset(args, False)
+    # dataloader_val = torch.utils.data.DataLoader(
+    #     dataset_val, 
+    #     batch_size=len(args.ATMDTT) + 2,
+    #     num_workers=1
+    # )
+
+    # dataset_val = CustomDataset2(args, args.image_path, True)
     dataloader_val = torch.utils.data.DataLoader(
         dataset_val, 
-        batch_size=len(args.ATMDTT) + 2,
-        num_workers=4
+        batch_size = 2,
+        # batch_size=len(args.ATMDTT) + 2,
+        num_workers=0
     )
     
     
     #Intialise the intensity control parameters for demonstration
     LABELS = torch.FloatTensor(args.ATMDTT).to(device)
-    SCALE =  torch.FloatTensor([0.1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).to(device).view(13,1)
+    SCALE =  torch.FloatTensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).to(device).view(13,1)
     # SCALE =  torch.FloatTensor([-4.0,-3.0, -2.0,-1.5, -1.0, -0.5,0,0.5, 1.0,1.5,2.0,3.0,4.0]).to(device).view(13,1)
     
     #start training

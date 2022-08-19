@@ -14,6 +14,7 @@ This module structure is following:
     VGGPerceptualLoss, the perceptual loss based on VGG19.
 """
 
+from itertools import accumulate
 import math
 import torch
 import torchvision
@@ -757,7 +758,6 @@ class Linear(nn.Module):
     def forward(self, input):
         out = F.linear(input, self.weight * self.scale, bias=self.bias)
         return out
-# class Domain_Discriminator(nn.Module):
 
 class Classifier(nn.Module):
     def __init__(self,c_dim):
@@ -780,9 +780,9 @@ class Classifier(nn.Module):
         if a is not None :
             a = a.view(a.size(0),1,-1)
             return x + (d * a).sum(-1)
-        else: 
+        else :
             return x + d.sum(-1)
-        
+
 #model discriminator 
 class Discriminator(nn.Module):
     def __init__(self, in_channels, c_dim, model_type, channel_multiplier=1, blur_kernel=[1, 3, 3, 1]):
@@ -893,6 +893,13 @@ def d_r1_loss(real_pred, real_img):
 
     return grad_penalty
 
+def accumulate2(model1, model2, decay=0.999):
+    par1 = dict(model1.named_parameters())
+    par2 = dict(model2.named_parameters())
+
+    for k in par1.keys():
+        par1[k].data.mul_(decay).add_(par2[k].data, alpha=1 - decay)
+
 # SFGAN model
 class Model(nn.Module):
     def __init__(self, args,c_dim, augment):  
@@ -900,12 +907,14 @@ class Model(nn.Module):
         self.args = args
         self.encoder_img          = Encoder(3,64, 6)
         self.generator            = Generator(c_dim)
+        self.g_ema                = Generator(c_dim)
         self.classifier           = Classifier(c_dim)
         if args.model_type == 1:
             self.edit             = Embeding(c_dim)  
         self.img_discriminator    = Discriminator(3,c_dim,args.model_type)
         self.vgg                  = VGGPerceptualLoss()
-        self.augment              = augment 
+        self.augment              = augment
+        self.accum = 0.5 ** (32 / (10 * 1000))
         
         d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1)
         
@@ -941,134 +950,136 @@ class Model(nn.Module):
                 betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio)
                 )
             
-    def forward(self, img = None,sampled_ratio = None, label = None, target_mask = None, domain_img=None, ada_aug_p = None, noise = None,train_discriminator = False, d_regularize = False, train_generator = False, generate = False):
-            augment = self.augment    
-            if train_discriminator or d_regularize:
-                requires_grad(self.encoder_img, False)
-                requires_grad(self.generator, False)
-                requires_grad(self.img_discriminator, True)
+    def forward(self, img = None,sampled_ratio = None, label = None, target_mask = None, ada_aug_p = None, noise = None,train_discriminator = False, d_regularize = False, train_generator = False, generate = False):
+        augment = self.augment    
+        if train_discriminator or d_regularize:
+            requires_grad(self.encoder_img, False)
+            requires_grad(self.generator, False)
+            requires_grad(self.img_discriminator, True)
 
-                if self.args.model_type == 1:
-                    requires_grad(self.edit, False) # Embedding
-                    requires_grad(self.classifier, False)
+            if self.args.model_type == 1:
+                requires_grad(self.edit, False) # Embedding
+                requires_grad(self.classifier, False)
+            else:
+                requires_grad(self.classifier, True)
+        
+        else:
+            requires_grad(self.encoder_img, True)
+            requires_grad(self.generator, True)
+            requires_grad(self.img_discriminator, False)
+
+            if self.args.model_type == 1:
+                requires_grad(self.edit, True) # Embedding
+                requires_grad(self.classifier, True)
+            else:
+                requires_grad(self.classifier, False)
+            
+        if train_discriminator:
+            if self.args.model_type == 0:
+                img_latent    = self.encoder_img(img)
+                fake_img      = self.generator(img_latent)
+                
+                if self.args.augment:
+                    real_img_aug, _  = augment(img, ada_aug_p)
+                    fake_img, _      = augment(fake_img, ada_aug_p)
                 else:
-                    requires_grad(self.classifier, True)
+                    real_img_aug = img
+
+                self.generator.zero_grad()
+                                                
+                fake_img_pred, _   = self.img_discriminator(fake_img)
+                real_img_pred, bce = self.img_discriminator(real_img_aug)
+
+                return fake_img_pred, real_img_pred, bce
+            else:
+                img_latent    = self.encoder_img(img)
+                img_latent_1  = self.edit(img_latent, sampled_ratio)
+                fake_img      = self.generator(img_latent_1)
+                                
+                bce = nn.MSELoss()(self.classifier(img_latent),  label * 2 - 1) 
+                
+                if self.args.augment:
+                    real_img_aug, _  = augment(img, ada_aug_p)
+                    fake_img, _      = augment(fake_img, ada_aug_p)
+                else:
+                    real_img_aug = img
+                
+                fake_img_pred, _ = self.img_discriminator(fake_img)
+                real_img_pred, real_class = self.img_discriminator(real_img_aug)
+                
+                outer_bce = nn.BCEWithLogitsLoss()(real_class,  label)
+                
+                return  fake_img_pred, real_img_pred, bce + outer_bce * 0.0
+        
+        if d_regularize:
+            real_pred_img, _  = self.img_discriminator(img)
+            r1_loss           = d_r1_loss(real_pred_img,img)
+            return r1_loss 
+        
+        if train_generator:
+            img_latent       = self.encoder_img(img)
+            # sketch_latent    = self.encoder_sketch(downsample(sketch))
+            # sketch_loss      = nn.L1Loss()(sketch_latent, img_latent.detach())
+            reconstruct_img  = self.generator(img_latent)
+            vgg_loss         = self.vgg(reconstruct_img,img)
+            reconstruct_loss = nn.L1Loss()(reconstruct_img,img)
+            # domain_loss       
+
+            if self.args.model_type == 0:
+                accumulate2(self.g_ema, self.generator)
+                
+                bce,orthologoy      = self.classifier(img_latent, True)
+                bce                 = nn.MSELoss()(bce,  label * 2 - 1) 
+            
+                if self.args.augment:
+                    reconstruct_img, GC  = augment(reconstruct_img, ada_aug_p)
+                
+                fake_pred_img, _    = self.img_discriminator(reconstruct_img)
+                g_loss_img          = g_nonsaturating_loss(fake_pred_img)
+                
+                g_total  = vgg_loss * 2.5 +\
+                            reconstruct_loss * 2.5 +\
+                            g_loss_img +\
+                            bce * 0.5 +\
+                            orthologoy
+                return g_total, self.g_ema
             
             else:
-                requires_grad(self.encoder_img, True)
-                requires_grad(self.generator, True)
-                requires_grad(self.img_discriminator, False)
-
-                if self.args.model_type == 1:
-                    requires_grad(self.edit, True) # Embedding
-                    requires_grad(self.classifier, True)
-                else:
-                    requires_grad(self.classifier, False)
+                accumulate2(self.g_ema, self.generator, self.accum)
+                img_latent_1    = self.edit(img_latent,  sampled_ratio)
+                # sketch_latent_1 = self.edit(sketch_latent,    sampled_ratio)
                 
-            if train_discriminator:
-                if self.args.model_type == 0:
-                    img_latent    = self.encoder_img(img)
-                    fake_img      = self.generator(img_latent)
-                    
-                    if self.args.augment:
-                        real_img_aug, _  = augment(img, ada_aug_p)
-                        fake_img, _      = augment(fake_img, ada_aug_p)
-                    else:
-                        real_img_aug = img
-                                   
-                    fake_img_pred, _   = self.img_discriminator(fake_img)
-                    real_img_pred, bce = self.img_discriminator(real_img_aug)
-                    
-                    return fake_img_pred, real_img_pred, bce
-                else:
-                    img_latent    = self.encoder_img(img)
-                    img_latent_1  = self.edit(img_latent, sampled_ratio)
-                    fake_img      = self.generator(img_latent_1)
-                                   
-                    bce = nn.MSELoss()(self.classifier(img_latent),  label * 2 - 1) 
-                    
-                    if self.args.augment:
-                        real_img_aug, _  = augment(img, ada_aug_p)
-                        fake_img, _      = augment(fake_img, ada_aug_p)
-                    else:
-                        real_img_aug = img
-                    
-                    fake_img_pred, _ = self.img_discriminator(fake_img)
-                    real_img_pred, real_class = self.img_discriminator(real_img_aug)
-                    
-                    outer_bce = nn.BCEWithLogitsLoss()(real_class,  label)
-                    
-                    return  fake_img_pred, real_img_pred, bce + outer_bce * 0.0
-            
-            if d_regularize:
-                real_pred_img, _  = self.img_discriminator(img)
-                r1_loss           = d_r1_loss(real_pred_img,img)
-                return r1_loss 
-            
-            if train_generator:
-                img_latent       = self.encoder_img(img)
-                # sketch_latent    = self.encoder_sketch(downsample(sketch))
-                # sketch_loss      = nn.L1Loss()(sketch_latent, img_latent.detach())
-                reconstruct_img  = self.generator(img_latent)
-                vgg_loss         = self.vgg(reconstruct_img,img)
-                reconstruct_loss = nn.L1Loss()(reconstruct_img,img)
-                # domain_loss       
-
-                if self.args.model_type == 0:
-                    
-                    bce,orthologoy      = self.classifier(img_latent, True)
-                    bce                 = nn.MSELoss()(bce,  label * 2 - 1) 
+                fake_img        = self.generator(img_latent_1)
+                # reg             = self.edit(img_latent, sampled_ratio * 0.0, reg = True).abs().mean()
                 
-                    if self.args.augment:
-                        reconstruct_img, GC  = augment(reconstruct_img, ada_aug_p)
-                    
-                    fake_pred_img, _    = self.img_discriminator(reconstruct_img)
-                    g_loss_img          = g_nonsaturating_loss(fake_pred_img)
-                    
-                    g_total  = vgg_loss * 2.5 +\
-                               reconstruct_loss * 2.5 +\
-                               g_loss_img +\
-                               bce * 0.5 +\
-                               orthologoy
-                    return g_total
+                latent_reconstruct  = (self.edit(self.edit(img_latent.detach(),sampled_ratio), -sampled_ratio) - img_latent.detach()).abs().mean()
+                base_score          = self.classifier(img_latent).detach() + sampled_ratio
+                edit_loss           = nn.MSELoss()(self.classifier(img_latent_1), base_score)
+                        
+                            
+                if self.args.augment:
+                    fake_img, _  = augment(fake_img, ada_aug_p)
+        
+                fake_pred_img, fake_class = self.img_discriminator(fake_img)
+                g_loss_img                = g_nonsaturating_loss(fake_pred_img)
                 
-                else:
-                    img_latent_1    = self.edit(img_latent,  sampled_ratio)
-                    # sketch_latent_1 = self.edit(sketch_latent,    sampled_ratio)
-                    
-                    fake_img        = self.generator(img_latent_1)
-                    reg             = self.edit(img_latent, sampled_ratio * 0.0, reg = True).abs().mean()
-                    
-                    latent_reconstruct  = (self.edit(self.edit(img_latent.detach(),sampled_ratio), -sampled_ratio) - img_latent.detach()).abs().mean()
-                    base_score          = self.classifier(img_latent).detach() + sampled_ratio
-                    edit_loss           = nn.MSELoss()(self.classifier(img_latent_1), base_score)
-                         
-                               
-                    if self.args.augment:
-                        fake_img, _  = augment(fake_img, ada_aug_p)
-            
-                    fake_pred_img, fake_class = self.img_discriminator(fake_img)
-                    g_loss_img                = g_nonsaturating_loss(fake_pred_img)
-                    
-                    outer_edit = nn.BCEWithLogitsLoss()(fake_class,target_mask * 1.0)
-                    
-                    g_total = vgg_loss * 2.5 +\
-                              reg * 0.1 +\
-                              (edit_loss + outer_edit * 0.0) * 1.0 +\
-                              reconstruct_loss * 1.0  +\
-                              latent_reconstruct * 1.0 +\
-                              g_loss_img   
-                              
-                    return g_total
-            
-            if generate:
-                img    = self.encoder_img(img)
-                # sketch = self.encoder_sketch(downsample(sketch))
-                if self.args.model_type == 0:
-                    sketch = self.classifier.edit(img,sampled_ratio)
-                else:
-                    sketch = self.edit(img,sampled_ratio)
-                img    = self.generator(img)
-                # sketch = self.generator(sketch)
-                # return img,sketch
-                return img
+                outer_edit = nn.BCEWithLogitsLoss()(fake_class,target_mask * 1.0)
+                
+                g_total = vgg_loss * 2.5 +\
+                            (edit_loss + outer_edit * 0.0) * 1.0 +\
+                            reconstruct_loss * 1.0  +\
+                            latent_reconstruct * 1.0 +\
+                            g_loss_img   
+                            
+                return g_total, self.g_ema
+        
+        if generate:
+            img    = self.encoder_img(img)
+            # sketch = self.encoder_sketch(downsample(sketch))
+            if self.args.model_type == 0:
+                sketch = self.classifier.edit(img,sampled_ratio)
+            else:
+                sketch = self.edit(img,sampled_ratio)
+            img    = self.generator(img)
+            # sketch = self.generator(sketch)
+            return img

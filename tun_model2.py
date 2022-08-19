@@ -758,7 +758,6 @@ class Linear(nn.Module):
         out = F.linear(input, self.weight * self.scale, bias=self.bias)
         return out
 
-
 class Classifier(nn.Module):
     def __init__(self,c_dim):
         super().__init__()
@@ -783,7 +782,6 @@ class Classifier(nn.Module):
         else :
             return x + d.sum(-1)
 
-        
 #model discriminator 
 class Discriminator(nn.Module):
     def __init__(self, in_channels, c_dim, model_type, channel_multiplier=1, blur_kernel=[1, 3, 3, 1]):
@@ -1071,4 +1069,3 @@ class Model(nn.Module):
             img    = self.generator(img)
             # sketch = self.generator(sketch)
             return img
-            # return img

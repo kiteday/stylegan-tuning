@@ -1,3 +1,5 @@
+# 이미지 한 장 주면 모델 통과해서 만들어주는 코드
+
 import argparse
 # from random import sample
 # import numpy as np
@@ -23,14 +25,10 @@ def generate(loader, model):
     with torch.no_grad():
         samples = None
         num =0
-           
-        print("j :",img[0])
 
-        # k는 generator img, im은 k 이미지 모음
+        # k는 generator img, im은 k 이미지 모음(여기선 이미지가 1개이므로 지움)
         k = model(img=img[0].view(1,3,256,256),generate = True) 
-        # im = im.view(3,256,256)
-        # print('j :',img[0].view(1,3,256,256))
-        # im = torch.cat([x for x in im],-1) #k.view(3,256,256)와 같음
+        
         print('k :', k)
         # print('im :', im)
         # # k를 출력(256)에 맞게 reshape
@@ -181,7 +179,7 @@ if __name__=="__main__":
     # g_optim = model.g_optim
     # d_optim = model.d_optim
 
-    model = nn.DataParallel(model, [0])
+    model_ema = nn.DataParallel(model_ema, [0])
 
 
     
@@ -202,4 +200,4 @@ if __name__=="__main__":
 
     SCALE =  torch.FloatTensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).to(device).view(13,1)
 
-    generate(loader, model)
+    generate(loader, model_ema)
