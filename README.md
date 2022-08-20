@@ -24,5 +24,4 @@ S2FGAN-master.zip : 과거 튜닝코드 최신 X
 ### tuning version3 : 모델 학습 시, g_ema 추가 저장
 * tun_model3.py
 * tun_train3.py 
-
 * tun_generate3.py : 2와는 달리 모델을 가져오지 않고 모델에 저장한 g_ema만 가져옴
